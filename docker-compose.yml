@@ -1,0 +1,140 @@
+# =============================================================
+# WORKING DATA ENGINEERING STACK
+# Spark + Airflow + Postgres + MinIO + Featurestore
+# =============================================================
+
+services:
+  # -----------------------------------------------------------
+  # 🗄️ MinIO - Object Storage (acts like S3)
+  # -----------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    env_file: .env
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+
+  # -----------------------------------------------------------
+  # 🐘 Postgres - Metadata Store
+  # -----------------------------------------------------------
+  postgres:
+    image: postgres:15
+    container_name: de_postgres
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # -----------------------------------------------------------
+  # ⚡ Spark Master (Apache official image layout)
+  # -----------------------------------------------------------
+  spark-master:
+    build:
+      context: .
+      dockerfile: ./infra/docker/spark.Dockerfile
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      # Pass MinIO creds for SDK-based access if jobs read AWS_* from env
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+    command: >
+      bash -lc "start-master.sh && tail -f /opt/spark/logs/*"
+    ports:
+      - "8080:8080"   # Spark Master UI
+      - "7077:7077"   # Spark Master RPC
+    volumes:
+      - ./spark_jobs:/opt/spark/jobs
+      - ./infra/hadoop/jars:/opt/spark/jars
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    depends_on:
+      - minio
+
+  # -----------------------------------------------------------
+  # ⚙️ Spark Worker (Apache official image layout)
+  # -----------------------------------------------------------
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER=spark://spark-master:7077
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+    command: >
+      bash -lc "start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
+    depends_on:
+      - spark-master
+      - minio
+    volumes:
+      - ./infra/hadoop/jars:/opt/spark/jars
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+
+  # -----------------------------------------------------------
+  # 🌬️ Apache Airflow
+  # -----------------------------------------------------------
+  airflow:
+    image: apache/airflow:2.6.3
+    container_name: airflow
+    env_file: .env
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "8081:8080"   # Airflow Webserver UI
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./spark_jobs:/opt/spark/jobs
+    depends_on:
+      - postgres
+      - spark-master
+      - minio
+
+  # -----------------------------------------------------------
+  # 🧩 Data Ingestion Service
+  # -----------------------------------------------------------
+  ingestion:
+    build:
+      context: .
+      dockerfile: ./infra/docker/ingestion.Dockerfile
+    container_name: ingestion
+    env_file: .env
+    volumes:
+      - ./ingestion:/app
+    depends_on:
+      - minio
+
+  # -----------------------------------------------------------
+  # 🧠 Feature Store Service
+  # -----------------------------------------------------------
+  featurestore:
+    build:
+      context: .
+      dockerfile: ./infra/docker/featurestore.Dockerfile
+    container_name: featurestore
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./featurestore:/app
+    depends_on:
+      - minio
+      - postgres
+
+# -----------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------
+volumes:
+  minio_data: {}
+  postgres_data: {}
