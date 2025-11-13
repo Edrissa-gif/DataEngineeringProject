@@ -81,7 +81,7 @@ docker-compose up --build
 ```
 
 4. **Access Airflow UI**
-   Open `http://localhost:8080` to monitor DAGs and schedule batch pipelines.
+   Open `http://localhost:9001` to monitor DAGs and schedule batch pipelines.
 
 ---
 
@@ -143,6 +143,7 @@ docker run -p 5000:5000 featurestore
 * Write reflection and lessons learned for project completion.
 
 ---
+
 
 
 
